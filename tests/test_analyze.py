@@ -4,7 +4,15 @@ import networkx as nx
 from pathlib import Path
 from graphify.build import build_from_json
 from graphify.cluster import cluster
-from graphify.analyze import god_nodes, surprising_connections, _is_concept_node, graph_diff, _surprise_score, _file_category
+from graphify.analyze import (
+    god_nodes,
+    surprising_connections,
+    _is_concept_node,
+    graph_diff,
+    _surprise_score,
+    _file_category,
+    _is_generic_json_key,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -230,3 +238,112 @@ def test_graph_diff_empty_diff():
     assert diff["new_edges"] == []
     assert diff["removed_edges"] == []
     assert diff["summary"] == "no changes"
+
+
+# --- generic JSON key / npm manifest denylist tests ---
+
+def _make_npm_graph():
+    """Build a graph that mirrors the rsl-siege-manager god-node problem.
+
+    ``devDependencies`` has many edges (one per package) so it dominates
+    the god-node list without a denylist.  ``PlayerService`` is the single
+    real architectural node that should appear instead.
+    """
+    G = nx.Graph()
+    # The npm manifest key node — many edges, but semantically empty
+    G.add_node(
+        "devDependencies",
+        label="devDependencies",
+        source_file="package.json",
+        file_type="code",
+    )
+    # Simulate 12 dependency edges (enough to outrank any real node)
+    for i in range(12):
+        pkg_id = f"pkg_{i}"
+        G.add_node(pkg_id, label=f"@scope/pkg-{i}", source_file="package.json", file_type="code")
+        G.add_edge("devDependencies", pkg_id, relation="contains", confidence="EXTRACTED",
+                   source_file="package.json", weight=1.0)
+    # A real architectural node with fewer but meaningful edges
+    G.add_node("svc", label="PlayerService", source_file="src/player.ts", file_type="code")
+    for i in range(3):
+        peer_id = f"peer_{i}"
+        G.add_node(peer_id, label=f"Peer{i}", source_file=f"src/peer{i}.ts", file_type="code")
+        G.add_edge("svc", peer_id, relation="calls", confidence="EXTRACTED",
+                   source_file="src/player.ts", weight=1.0)
+    return G
+
+
+def test_is_generic_json_key_npm_manifest_keys():
+    """All npm dependency-block keys must be identified as generic JSON keys."""
+    npm_keys = {
+        "dependencies",
+        "devDependencies",
+        "peerDependencies",
+        "optionalDependencies",
+        "bundledDependencies",
+    }
+    for key in npm_keys:
+        assert _is_generic_json_key(key), f"Expected {key!r} to be a generic JSON key"
+
+
+def test_is_generic_json_key_generic_json_keys():
+    """Standard generic JSON schema keys must be identified as generic."""
+    generic_keys = {"start", "end", "name", "id", "type", "properties", "value",
+                    "key", "data", "items", "title", "description", "version"}
+    for key in generic_keys:
+        assert _is_generic_json_key(key), f"Expected {key!r} to be a generic JSON key"
+
+
+def test_is_generic_json_key_real_labels():
+    """Real architectural labels must NOT be treated as generic JSON keys."""
+    real_labels = {"PlayerService", "AuthController", "DatabaseManager", "render", "parseConfig"}
+    for label in real_labels:
+        assert not _is_generic_json_key(label), f"Expected {label!r} NOT to be a generic JSON key"
+
+
+def test_god_nodes_excludes_npm_manifest_keys():
+    """devDependencies and friends must not appear in the god-node list."""
+    G = _make_npm_graph()
+    result = god_nodes(G, top_n=10)
+    labels = [r["label"] for r in result]
+    npm_manifest_keys = {
+        "dependencies", "devDependencies", "peerDependencies",
+        "optionalDependencies", "bundledDependencies",
+    }
+    for label in labels:
+        assert label not in npm_manifest_keys, (
+            f"npm manifest key {label!r} should be excluded from god nodes"
+        )
+
+
+def test_god_nodes_npm_key_excluded_real_node_included():
+    """With npm keys filtered, the real architectural node should win the top spot."""
+    G = _make_npm_graph()
+    result = god_nodes(G, top_n=5)
+    labels = [r["label"] for r in result]
+    assert "PlayerService" in labels, "Real node PlayerService should appear in god nodes"
+    assert "devDependencies" not in labels, "devDependencies must be filtered out"
+
+
+def test_god_nodes_excludes_all_generic_json_keys():
+    """All standard generic JSON schema keys must be excluded from god nodes."""
+    G = nx.Graph()
+    generic_keys = ["start", "end", "name", "id", "type", "properties", "value",
+                    "key", "data", "items", "title", "description", "version"]
+    # Give each generic key 15 edges so they'd dominate without filtering
+    for gk in generic_keys:
+        G.add_node(gk, label=gk, source_file="schema.json", file_type="code")
+        for i in range(15):
+            child_id = f"{gk}_child_{i}"
+            G.add_node(child_id, label=f"{gk}_{i}", source_file="schema.json", file_type="code")
+            G.add_edge(gk, child_id, relation="contains", confidence="EXTRACTED",
+                       source_file="schema.json", weight=1.0)
+    # One real node
+    G.add_node("real_svc", label="RealService", source_file="src/service.py", file_type="code")
+    G.add_edge("real_svc", generic_keys[0] + "_child_0", relation="uses",
+               confidence="EXTRACTED", source_file="src/service.py", weight=1.0)
+
+    result = god_nodes(G, top_n=10)
+    result_labels = [r["label"] for r in result]
+    for gk in generic_keys:
+        assert gk not in result_labels, f"Generic JSON key {gk!r} should be excluded from god nodes"

@@ -5,6 +5,38 @@ import networkx as nx
 
 from graphify.build import edge_data
 
+# Generic JSON schema keys that appear in many files but carry no architectural meaning.
+# Nodes whose label matches one of these are excluded from god-node reporting because
+# they accumulate edges mechanically (every property / item in a JSON document links
+# back to the parent key) and are not real abstractions (#890).
+_GENERIC_JSON_KEYS: frozenset[str] = frozenset({
+    # Common JSON schema / data-model structural keys
+    "start", "end", "name", "id", "type", "properties", "value",
+    "key", "data", "items", "title", "description", "version",
+    # npm package.json dependency-block keys (#2)
+    "dependencies", "devDependencies", "peerDependencies",
+    "optionalDependencies", "bundledDependencies",
+})
+
+
+def _is_generic_json_key(label: str) -> bool:
+    """Return True if *label* is a well-known generic JSON structural key.
+
+    These labels appear as nodes in JSON-extracted graphs but carry no
+    meaningful architectural information.  They accumulate edges mechanically
+    (each property / array item in a JSON file connects to its parent key)
+    and would otherwise dominate god-node lists despite representing nothing
+    more than JSON schema boilerplate.
+
+    Args:
+        label: The node label to check.
+
+    Returns:
+        True if the label is in the generic-JSON denylist.
+    """
+    return label in _GENERIC_JSON_KEYS
+
+
 # Language families — extensions sharing a runtime can legitimately call each other
 _LANG_FAMILY: dict[str, str] = {
     **{e: "python" for e in (".py", ".pyw")},
@@ -68,8 +100,15 @@ def _is_file_node(G: nx.Graph, node_id: str) -> bool:
 def god_nodes(G: nx.Graph, top_n: int = 10) -> list[dict]:
     """Return the top_n most-connected real entities - the core abstractions.
 
-    File-level hub nodes are excluded: they accumulate import/contains edges
-    mechanically and don't represent meaningful architectural abstractions.
+    The following node categories are excluded because they accumulate edges
+    mechanically and do not represent meaningful architectural abstractions:
+
+    - File-level hub nodes (synthetic nodes created by the AST extractor)
+    - Concept nodes (manually-injected semantic nodes without a real source file)
+    - Generic JSON structural keys (e.g. ``properties``, ``items``) and npm
+      package.json dependency-block keys (e.g. ``devDependencies``) — these
+      would otherwise dominate any corpus that contains JSON files with many
+      entries (#890, #2).
     """
     degree = dict(G.degree())
     sorted_nodes = sorted(degree.items(), key=lambda x: x[1], reverse=True)
@@ -77,9 +116,12 @@ def god_nodes(G: nx.Graph, top_n: int = 10) -> list[dict]:
     for node_id, deg in sorted_nodes:
         if _is_file_node(G, node_id) or _is_concept_node(G, node_id):
             continue
+        label = G.nodes[node_id].get("label", node_id)
+        if _is_generic_json_key(label):
+            continue
         result.append({
             "id": node_id,
-            "label": G.nodes[node_id].get("label", node_id),
+            "label": label,
             "degree": deg,
         })
         if len(result) >= top_n:
