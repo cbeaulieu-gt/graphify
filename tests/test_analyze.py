@@ -347,3 +347,27 @@ def test_god_nodes_excludes_all_generic_json_keys():
     result_labels = [r["label"] for r in result]
     for gk in generic_keys:
         assert gk not in result_labels, f"Generic JSON key {gk!r} should be excluded from god nodes"
+
+
+_RSL_GRAPH_JSON = Path(
+    "I:/games/raid/siege-web/.worktrees/graphify-eval-6085fd66/graphify-out/graph.json"
+)
+
+
+def test_god_nodes_rsl_siege_manager_excludes_dev_dependencies():
+    """Integration test: devDependencies must not appear in the rsl-siege-manager top-10.
+
+    Uses the committed graph.json from the worked/ case study.  This test is
+    skipped automatically when the corpus is not present (CI / other machines).
+    """
+    import pytest
+    if not _RSL_GRAPH_JSON.exists():
+        pytest.skip("rsl-siege-manager graph.json not found — skipping integration test")
+
+    data = json.loads(_RSL_GRAPH_JSON.read_text(encoding="utf-8"))
+    G = build_from_json(data)
+    result = god_nodes(G, top_n=10)
+    labels = [r["label"] for r in result]
+    assert "devDependencies" not in labels, (
+        f"devDependencies should be excluded from god nodes; got: {labels}"
+    )
